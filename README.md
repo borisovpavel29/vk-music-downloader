@@ -28,6 +28,12 @@ Download a whole playlist:
 python vk_audio_downloader.py --playlist https://vk.com/music/playlist/142774160_74879692_d64ad4a8663b97a847 --token <VK_TOKEN>
 ```
 
+Download all tracks from user audio:
+
+```bash
+python vk_audio_downloader.py --user https://vk.com/audios142774160 --token <VK_TOKEN>
+```
+
 Save to specific directory:
 
 ```bash
@@ -39,6 +45,19 @@ Choose behavior if file already exists (`skip` by default):
 ```bash
 python vk_audio_downloader.py --playlist <PLAYLIST_URL> --if-exists replace --token <VK_TOKEN>
 ```
+
+Choose file sorting mode (`none` by default):
+
+```bash
+python vk_audio_downloader.py --playlist <PLAYLIST_URL> --sort artist-folder --token <VK_TOKEN>
+python vk_audio_downloader.py --playlist <PLAYLIST_URL> --sort artist-folder-name --token <VK_TOKEN>
+```
+
+Sort modes:
+
+- `none`: no folder sorting, files are saved as `Artist - Title.mp3` in target directory.
+- `artist-folder`: create `%artist%/` subfolder and save file as `Title.mp3`.
+- `artist-folder-name`: create `%artist%/` subfolder and save file as `Artist - Title.mp3`.
 
 You can set token via environment variable:
 

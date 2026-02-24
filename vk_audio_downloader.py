@@ -4,6 +4,7 @@
 Usage examples:
   python vk_audio_downloader.py --track https://vk.com/audio142774160_456240188_71b76a487be610b2fb
   python vk_audio_downloader.py --playlist https://vk.com/music/playlist/142774160_74879692_d64ad4a8663b97a847 --path ./music
+  python vk_audio_downloader.py --user https://vk.com/audios142774160 --path ./music
 
 Authentication:
   Provide VK user token with audio access via --token or VK_TOKEN environment variable.
@@ -34,6 +35,7 @@ TRACK_PATTERN = re.compile(
 PLAYLIST_PATTERN = re.compile(
     r"vk\.com/music/playlist/(?P<owner_id>-?\d+)_(?P<playlist_id>\d+)(?:_(?P<access_key>[A-Za-z0-9]+))?"
 )
+USER_AUDIO_PATTERN = re.compile(r"vk\.com/audios(?P<owner_id>-?\d+)")
 
 
 class VkApiError(RuntimeError):
@@ -72,6 +74,13 @@ def parse_playlist_url(url: str) -> Dict[str, Optional[str]]:
             "Invalid playlist URL. Expected format: https://vk.com/music/playlist/<owner_id>_<playlist_id>_<access_key>"
         )
     return match.groupdict()
+
+
+def parse_user_audio_url(url: str) -> Dict[str, str]:
+    match = USER_AUDIO_PATTERN.search(url)
+    if not match:
+        raise ValueError("Invalid user audio URL. Expected format: https://vk.com/audios<owner_id>")
+    return {"owner_id": match.group("owner_id")}
 
 
 def vk_api_call(method: str, token: str, params: Dict[str, object]) -> Dict[str, object]:
@@ -142,6 +151,45 @@ def get_playlist_tracks(
 
     if not all_tracks:
         raise RuntimeError("Playlist is empty, inaccessible, or VK API did not return items.")
+
+    return all_tracks
+
+
+def get_user_tracks(token: str, owner_id: str) -> List[Dict[str, object]]:
+    offset = 0
+    count = 200
+    all_tracks: List[Dict[str, object]] = []
+    total_count: Optional[int] = None
+
+    while True:
+        params: Dict[str, object] = {
+            "owner_id": owner_id,
+            "offset": offset,
+            "count": count,
+        }
+
+        response = vk_api_call("audio.get", token, params)
+        if total_count is None and isinstance(response, dict) and isinstance(response.get("count"), int):
+            total_count = response["count"]
+
+        items = response.get("items") if isinstance(response, dict) else None
+        if not isinstance(items, list):
+            items = []
+
+        if not items:
+            break
+
+        all_tracks.extend(items)
+
+        if len(items) < count:
+            break
+
+        offset += len(items)
+        if total_count is not None and offset >= total_count:
+            break
+
+    if not all_tracks:
+        raise RuntimeError("User audio is empty, inaccessible, or VK API did not return items.")
 
     return all_tracks
 
@@ -287,10 +335,21 @@ def is_hls_url(url: str) -> bool:
     return ".m3u8" in path
 
 
-def track_to_filename(track: Dict[str, object]) -> str:
+def track_to_filename(track: Dict[str, object], include_artist: bool = True) -> str:
     artist = str(track.get("artist") or "Unknown Artist")
     title = str(track.get("title") or "Unknown Title")
-    return sanitize_filename(f"{artist} - {title}.mp3")
+    if include_artist:
+        return sanitize_filename(f"{artist} - {title}.mp3")
+    return sanitize_filename(f"{title}.mp3")
+
+
+def build_track_output_path(track: Dict[str, object], base_output_dir: Path, sort_mode: str) -> Path:
+    artist = sanitize_filename(str(track.get("artist") or "Unknown Artist"))
+    if sort_mode == "artist-folder":
+        return base_output_dir / artist / track_to_filename(track, include_artist=False)
+    if sort_mode == "artist-folder-name":
+        return base_output_dir / artist / track_to_filename(track, include_artist=True)
+    return base_output_dir / track_to_filename(track, include_artist=True)
 
 
 def convert_to_mp3(source_path: Path, destination_path: Path) -> None:
@@ -312,7 +371,7 @@ def convert_to_mp3(source_path: Path, destination_path: Path) -> None:
     raise RuntimeError(f"ffmpeg conversion failed: {last_error or 'unknown ffmpeg error'}")
 
 
-def download_track(track: Dict[str, object], output_dir: Path, if_exists: str) -> Optional[Path]:
+def download_track(track: Dict[str, object], output_dir: Path, if_exists: str, sort_mode: str) -> Optional[Path]:
     title = f"{track.get('artist', 'Unknown Artist')} - {track.get('title', 'Unknown Title')}"
     url = track.get("url")
 
@@ -321,7 +380,8 @@ def download_track(track: Dict[str, object], output_dir: Path, if_exists: str) -
         return None
 
     hls_mode = is_hls_url(str(url))
-    output_path = output_dir / track_to_filename(track)
+    output_path = build_track_output_path(track, output_dir, sort_mode)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if output_path.exists():
         if if_exists == "skip":
@@ -356,6 +416,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--playlist",
         help="VK playlist URL, e.g. https://vk.com/music/playlist/142774160_74879692_key",
     )
+    group.add_argument("--user", help="VK user audio URL, e.g. https://vk.com/audios142774160")
 
     parser.add_argument("--path", default=".", help="Directory where audio files will be saved (default: current directory).")
     parser.add_argument("--token", default=os.getenv("VK_TOKEN"), help="VK API token (or set VK_TOKEN env var).")
@@ -364,6 +425,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("skip", "replace"),
         default="skip",
         help="Behavior when target file already exists: skip or replace (default: skip).",
+    )
+    parser.add_argument(
+        "--sort",
+        choices=("none", "artist-folder", "artist-folder-name"),
+        default="none",
+        help="Output sorting mode: none, artist-folder, or artist-folder-name (default: none).",
     )
     return parser
 
@@ -383,8 +450,8 @@ def main() -> int:
         if args.track:
             parsed = parse_track_url(args.track)
             track = get_track_info(args.token, parsed["owner_id"], parsed["audio_id"], parsed.get("access_key"))
-            download_track(track, output_dir, args.if_exists)
-        else:
+            download_track(track, output_dir, args.if_exists, args.sort)
+        elif args.playlist:
             parsed = parse_playlist_url(args.playlist)
             tracks = get_playlist_tracks(
                 args.token,
@@ -394,7 +461,13 @@ def main() -> int:
             )
             logging.info("Playlist tracks received: %d", len(tracks))
             for track in tracks:
-                download_track(track, output_dir, args.if_exists)
+                download_track(track, output_dir, args.if_exists, args.sort)
+        else:
+            parsed = parse_user_audio_url(args.user)
+            tracks = get_user_tracks(args.token, parsed["owner_id"])
+            logging.info("User audio tracks received: %d", len(tracks))
+            for track in tracks:
+                download_track(track, output_dir, args.if_exists, args.sort)
 
         logging.info("Download completed.")
         return 0
