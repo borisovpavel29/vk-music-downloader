@@ -155,6 +155,29 @@ def get_playlist_tracks(
     return all_tracks
 
 
+def get_playlist_title(token: str, owner_id: str, playlist_id: str, access_key: Optional[str]) -> Optional[str]:
+    params: Dict[str, object] = {"owner_id": owner_id, "playlist_ids": playlist_id}
+    if access_key:
+        params["access_key"] = access_key
+
+    try:
+        response = vk_api_call("audio.getPlaylists", token, params)
+    except VkApiError as exc:
+        logging.warning("Could not get playlist title: %s", exc)
+        return None
+
+    items = response.get("items") if isinstance(response, dict) else None
+    if not isinstance(items, list) or not items:
+        return None
+
+    first_item = items[0]
+    if isinstance(first_item, dict):
+        title = first_item.get("title")
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+    return None
+
+
 def get_user_tracks(token: str, owner_id: str) -> List[Dict[str, object]]:
     offset = 0
     count = 200
@@ -371,6 +394,37 @@ def convert_to_mp3(source_path: Path, destination_path: Path) -> None:
     raise RuntimeError(f"ffmpeg conversion failed: {last_error or 'unknown ffmpeg error'}")
 
 
+def append_skipped_track(skipped_file: Path, track_output_path: Path) -> None:
+    skipped_file.parent.mkdir(parents=True, exist_ok=True)
+    with skipped_file.open("a", encoding="utf-8") as file:
+        file.write(f"{track_output_path.name}\n")
+
+
+def download_tracks_with_skip_log(
+    tracks: List[Dict[str, object]],
+    output_dir: Path,
+    if_exists: str,
+    sort_mode: str,
+) -> None:
+    skipped_file = output_dir / "_skipped.txt"
+    skipped_count = 0
+
+    for track in tracks:
+        track_output_path = build_track_output_path(track, output_dir, sort_mode)
+        try:
+            result = download_track(track, output_dir, if_exists, sort_mode)
+            if result is None:
+                append_skipped_track(skipped_file, track_output_path)
+                skipped_count += 1
+        except (requests.RequestException, MissingDependencyError, RuntimeError, ValueError) as exc:
+            logging.error("Track failed and will be skipped: %s (%s)", track_output_path.name, exc)
+            append_skipped_track(skipped_file, track_output_path)
+            skipped_count += 1
+
+    if skipped_count > 0:
+        logging.warning("Skipped tracks written to: %s (count: %d)", skipped_file.resolve(), skipped_count)
+
+
 def download_track(track: Dict[str, object], output_dir: Path, if_exists: str, sort_mode: str) -> Optional[Path]:
     title = f"{track.get('artist', 'Unknown Artist')} - {track.get('title', 'Unknown Title')}"
     url = track.get("url")
@@ -453,6 +507,14 @@ def main() -> int:
             download_track(track, output_dir, args.if_exists, args.sort)
         elif args.playlist:
             parsed = parse_playlist_url(args.playlist)
+            playlist_title = get_playlist_title(
+                args.token,
+                parsed["owner_id"],
+                parsed["playlist_id"],
+                parsed.get("access_key"),
+            )
+            if playlist_title:
+                logging.info("Playlist title: %s", playlist_title)
             tracks = get_playlist_tracks(
                 args.token,
                 parsed["owner_id"],
@@ -460,14 +522,12 @@ def main() -> int:
                 parsed.get("access_key"),
             )
             logging.info("Playlist tracks received: %d", len(tracks))
-            for track in tracks:
-                download_track(track, output_dir, args.if_exists, args.sort)
+            download_tracks_with_skip_log(tracks, output_dir, args.if_exists, args.sort)
         else:
             parsed = parse_user_audio_url(args.user)
             tracks = get_user_tracks(args.token, parsed["owner_id"])
             logging.info("User audio tracks received: %d", len(tracks))
-            for track in tracks:
-                download_track(track, output_dir, args.if_exists, args.sort)
+            download_tracks_with_skip_log(tracks, output_dir, args.if_exists, args.sort)
 
         logging.info("Download completed.")
         return 0

@@ -80,3 +80,4 @@ python vk_audio_downloader.py --track <TRACK_URL>
 - If `--path` is not provided, files are saved in the current directory.
 - Works on Linux and Windows.
 - HLS streams from VK (`.m3u8`) are automatically downloaded and converted to `.mp3`.
+- In `--playlist` and `--user` modes, failed tracks are skipped and written to `_skipped.txt` in target directory.
