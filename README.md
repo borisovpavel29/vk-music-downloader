@@ -53,10 +53,20 @@ python vk_audio_downloader.py --playlist <PLAYLIST_URL> --sort artist-folder --t
 python vk_audio_downloader.py --playlist <PLAYLIST_URL> --sort artist-folder-name --token <VK_TOKEN>
 ```
 
-Enable metadata enrichment from MusicBrainz (writes ID3 tags for mp3):
+Enable metadata enrichment (tries multiple sources in order) and writes ID3 tags for mp3:
 
 ```bash
+python vk_audio_downloader.py --playlist <PLAYLIST_URL> --metadata-source auto --token <VK_TOKEN>
+```
+
+Use specific metadata source:
+
+```bash
+python vk_audio_downloader.py --playlist <PLAYLIST_URL> --metadata-source itunes --token <VK_TOKEN>
+python vk_audio_downloader.py --playlist <PLAYLIST_URL> --metadata-source deezer --token <VK_TOKEN>
 python vk_audio_downloader.py --playlist <PLAYLIST_URL> --metadata-source musicbrainz --token <VK_TOKEN>
+python vk_audio_downloader.py --playlist <PLAYLIST_URL> --metadata-source lastfm --token <VK_TOKEN>
+python vk_audio_downloader.py --playlist <PLAYLIST_URL> --metadata-source discogs --token <VK_TOKEN>
 ```
 
 Sort modes:
@@ -78,6 +88,8 @@ Windows PowerShell:
 
 ```powershell
 $env:VK_TOKEN="<VK_TOKEN>"
+$env:LASTFM_API_KEY="<LASTFM_API_KEY>"   # optional, only for --metadata-source lastfm/auto
+$env:DISCOGS_TOKEN="<DISCOGS_TOKEN>"     # optional, only for --metadata-source discogs/auto
 python vk_audio_downloader.py --track <TRACK_URL>
 ```
 
@@ -86,6 +98,9 @@ python vk_audio_downloader.py --track <TRACK_URL>
 - If `--path` is not provided, files are saved in the current directory.
 - Works on Linux and Windows.
 - HLS streams from VK (`.m3u8`) are automatically downloaded and converted to `.mp3`.
-- Optional metadata enrichment is available via `--metadata-source musicbrainz`.
+- Optional metadata enrichment is available via `--metadata-source <source>` or `--metadata-source auto`.
+- Metadata sources: `itunes`, `deezer`, `musicbrainz`, `lastfm`, `discogs`, or `auto`.
+- `--metadata-source auto` tries sources in this order: `itunes -> deezer -> musicbrainz -> lastfm -> discogs`.
+- `lastfm` requires `LASTFM_API_KEY`, `discogs` requires `DISCOGS_TOKEN`.
 - If external metadata is not found, script falls back to filename parsing (`Artist - Title.mp3`) for ID3 `artist`/`title`.
 - In `--playlist` and `--user` modes, failed tracks are skipped and written to `_skipped.txt` in target directory.

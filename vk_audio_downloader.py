@@ -27,6 +27,8 @@ from urllib.parse import urljoin, urlparse
 import requests
 from requests.adapters import HTTPAdapter
 
+from get_metadata import ALL_SOURCES, get_source_order, lookup_metadata
+
 VK_API_VERSION = "5.199"
 VK_API_BASE = "https://api.vk.com/method"
 CHUNK_SIZE = 64 * 1024
@@ -52,10 +54,6 @@ class MissingDependencyError(RuntimeError):
     """Raised when optional dependency is missing."""
 
 
-def normalize_for_match(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", value.lower())
-
-
 def ensure_mutagen_available() -> None:
     try:
         import mutagen  # type: ignore  # noqa: F401
@@ -70,6 +68,7 @@ class MetadataEnricher:
 
     def __init__(self, source: str) -> None:
         self.source = source
+        self.source_order = get_source_order(source)
         self.session = requests.Session()
         self.session.headers.update(
             {"User-Agent": "vk-audio-downloader/1.0 (https://github.com/)"}
@@ -77,21 +76,18 @@ class MetadataEnricher:
         adapter = HTTPAdapter(max_retries=0)
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
-        self._last_request_at = 0.0
-        self._consecutive_network_failures = 0
-        self._disabled_due_to_network = False
+        self._last_request_at_by_source: Dict[str, float] = {}
+        self._consecutive_network_failures: Dict[str, int] = {}
+        self._disabled_sources: set[str] = set()
+        self._last_metadata_source = "filename"
 
     def enrich_mp3(self, file_path: Path, track: Dict[str, object]) -> None:
-        if self._disabled_due_to_network:
+        metadata = self.lookup(track)
+        if not metadata:
             metadata = self.metadata_from_filename(file_path)
-            if not metadata:
-                return
-        else:
-            metadata = self.lookup(track)
-            if not metadata:
-                metadata = self.metadata_from_filename(file_path)
-            if not metadata:
-                return
+            self._last_metadata_source = "filename"
+        if not metadata:
+            return
 
         from mutagen.easyid3 import EasyID3  # type: ignore
         from mutagen.id3 import ID3NoHeaderError  # type: ignore
@@ -117,8 +113,7 @@ class MetadataEnricher:
             tags["genre"] = [str(metadata["genre"])]
 
         tags.save()
-        logging.info("Metadata updated from %s: %s", self.source, file_path.name)
-        self._consecutive_network_failures = 0
+        logging.info("Metadata updated from %s: %s", self._last_metadata_source, file_path.name)
 
     def metadata_from_filename(self, file_path: Path) -> Optional[Dict[str, str]]:
         stem = file_path.stem.strip()
@@ -141,30 +136,37 @@ class MetadataEnricher:
         return {"title": stem}
 
     def lookup(self, track: Dict[str, object]) -> Optional[Dict[str, str]]:
-        if self.source == "musicbrainz":
-            return self.lookup_musicbrainz(track)
-        return None
-
-    def throttle(self) -> None:
-        min_interval = 1.1
-        elapsed = time.monotonic() - self._last_request_at
-        if elapsed < min_interval:
-            time.sleep(min_interval - elapsed)
-
-    def lookup_musicbrainz(self, track: Dict[str, object]) -> Optional[Dict[str, str]]:
-        if self._disabled_due_to_network:
-            return None
         artist = str(track.get("artist") or "").strip()
         title = str(track.get("title") or "").strip()
         if not artist or not title:
             return None
 
-        base_url = "https://musicbrainz.org/ws/2/recording"
-        params = {
-            "fmt": "json",
-            "limit": 5,
-            "query": f'recording:"{title}" AND artist:"{artist}"',
-        }
+        for source in self.source_order:
+            if source in self._disabled_sources:
+                continue
+            try:
+                metadata = lookup_metadata(
+                    source=source,
+                    artist=artist,
+                    title=title,
+                    request_json=self.request_json,
+                )
+            except requests.RequestException as exc:
+                logging.warning("Metadata source %s failed for '%s - %s': %s", source, artist, title, exc)
+                continue
+            if metadata:
+                self._last_metadata_source = source
+                self._consecutive_network_failures[source] = 0
+                return metadata
+        return None
+
+    def throttle(self, source: str) -> None:
+        min_interval = 1.1
+        elapsed = time.monotonic() - self._last_request_at_by_source.get(source, 0.0)
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+
+    def request_json(self, source: str, base_url: str, params: Dict[str, str]) -> Dict[str, Any]:
         full_url = requests.Request("GET", base_url, params=params).prepare().url or base_url
 
         max_attempts = 4
@@ -173,16 +175,17 @@ class MetadataEnricher:
         last_exc: Optional[requests.RequestException] = None
 
         for attempt in range(1, max_attempts + 1):
-            self.throttle()
+            self.throttle(source)
             try:
                 response = self.session.get(base_url, params=params, timeout=30)
-                self._last_request_at = time.monotonic()
+                self._last_request_at_by_source[source] = time.monotonic()
                 if response.status_code in retryable_statuses and attempt < max_attempts:
                     wait_seconds = min(8, 2 ** (attempt - 1))
                     logging.warning(
-                        "Metadata retry %d/%d (HTTP %d): %s",
+                        "Metadata retry %d/%d for %s (HTTP %d): %s",
                         attempt,
                         max_attempts - 1,
+                        source,
                         response.status_code,
                         full_url,
                     )
@@ -191,88 +194,37 @@ class MetadataEnricher:
                 response.raise_for_status()
                 break
             except requests.RequestException as exc:
-                self._last_request_at = time.monotonic()
+                self._last_request_at_by_source[source] = time.monotonic()
                 last_exc = exc
                 if attempt < max_attempts:
                     wait_seconds = min(8, 2 ** (attempt - 1))
                     logging.warning(
-                        "Metadata retry %d/%d after error: %s (%s)",
+                        "Metadata retry %d/%d for %s after error: %s (%s)",
                         attempt,
                         max_attempts - 1,
+                        source,
                         full_url,
                         exc,
                     )
                     time.sleep(wait_seconds)
                     continue
-                self._consecutive_network_failures += 1
-                if self._consecutive_network_failures >= 3:
-                    self._disabled_due_to_network = True
+                failures = self._consecutive_network_failures.get(source, 0) + 1
+                self._consecutive_network_failures[source] = failures
+                if failures >= 3:
+                    self._disabled_sources.add(source)
                     logging.warning(
                         "Metadata source %s disabled after %d consecutive network failures.",
-                        self.source,
-                        self._consecutive_network_failures,
+                        source,
+                        failures,
                     )
                 raise
 
         if response is None:
             if last_exc is not None:
                 raise last_exc
-            return None
+            return {}
 
-        recordings = response.json().get("recordings")
-        if not isinstance(recordings, list) or not recordings:
-            return None
-
-        normalized_title = normalize_for_match(title)
-        normalized_artist = normalize_for_match(artist)
-
-        best_recording: Optional[Dict[str, object]] = None
-        best_rank = (-1, -1, -1)
-        for recording in recordings:
-            if not isinstance(recording, dict):
-                continue
-            recording_title = str(recording.get("title") or "")
-            artist_credit = recording.get("artist-credit") or []
-            artist_credit_names = " ".join(
-                str(item.get("name") or "")
-                for item in artist_credit
-                if isinstance(item, dict)
-            )
-
-            normalized_recording_title = normalize_for_match(recording_title)
-            normalized_credit = normalize_for_match(artist_credit_names)
-
-            title_exact = int(normalized_recording_title == normalized_title)
-            artist_match = int(
-                normalized_artist in normalized_credit or normalized_credit in normalized_artist
-            )
-            score = int(recording.get("score") or 0)
-            rank = (title_exact, artist_match, score)
-            if rank > best_rank:
-                best_rank = rank
-                best_recording = recording
-
-        if not best_recording:
-            return None
-
-        release_list = best_recording.get("releases") if isinstance(best_recording, dict) else None
-        release = release_list[0] if isinstance(release_list, list) and release_list else {}
-        release_title = str(release.get("title") or "").strip() if isinstance(release, dict) else ""
-        release_date = str(release.get("date") or "").strip() if isinstance(release, dict) else ""
-        tags = best_recording.get("tags") if isinstance(best_recording, dict) else None
-        genre = ""
-        if isinstance(tags, list) and tags:
-            first_tag = tags[0]
-            if isinstance(first_tag, dict):
-                genre = str(first_tag.get("name") or "").strip()
-
-        return {
-            "title": str(best_recording.get("title") or title).strip(),
-            "artist": artist,
-            "album": release_title,
-            "date": release_date,
-            "genre": genre,
-        }
+        return response.json()
 
 
 def setup_logging() -> None:
@@ -728,9 +680,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--metadata-source",
-        choices=("none", "musicbrainz"),
+        choices=("none", "auto", *ALL_SOURCES),
         default="none",
-        help="External metadata source for ID3 tags: none or musicbrainz (default: none).",
+        help="External metadata source for ID3 tags: none, auto, itunes, deezer, musicbrainz, lastfm, discogs (default: none).",
     )
     return parser
 
