@@ -64,6 +64,7 @@ class MetadataEnricher:
             tags["title"] = [str(metadata["title"])]
         if metadata.get("artist"):
             tags["artist"] = [str(metadata["artist"])]
+            tags["albumartist"] = [str(metadata["artist"])]
         if metadata.get("album"):
             tags["album"] = [str(metadata["album"])]
         if metadata.get("date"):
@@ -182,4 +183,3 @@ class MetadataEnricher:
             return {}
 
         return response.json()
-
