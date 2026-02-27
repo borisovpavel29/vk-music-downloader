@@ -53,6 +53,12 @@ python vk_audio_downloader.py --playlist <PLAYLIST_URL> --sort artist-folder --t
 python vk_audio_downloader.py --playlist <PLAYLIST_URL> --sort artist-folder-name --token <VK_TOKEN>
 ```
 
+Enable metadata enrichment from MusicBrainz (writes ID3 tags for mp3):
+
+```bash
+python vk_audio_downloader.py --playlist <PLAYLIST_URL> --metadata-source musicbrainz --token <VK_TOKEN>
+```
+
 Sort modes:
 
 - `none`: no folder sorting, files are saved as `Artist - Title.mp3` in target directory.
@@ -80,4 +86,6 @@ python vk_audio_downloader.py --track <TRACK_URL>
 - If `--path` is not provided, files are saved in the current directory.
 - Works on Linux and Windows.
 - HLS streams from VK (`.m3u8`) are automatically downloaded and converted to `.mp3`.
+- Optional metadata enrichment is available via `--metadata-source musicbrainz`.
+- If external metadata is not found, script falls back to filename parsing (`Artist - Title.mp3`) for ID3 `artist`/`title`.
 - In `--playlist` and `--user` modes, failed tracks are skipped and written to `_skipped.txt` in target directory.

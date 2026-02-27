@@ -19,11 +19,13 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
 
 VK_API_VERSION = "5.199"
 VK_API_BASE = "https://api.vk.com/method"
@@ -48,6 +50,229 @@ class HlsParseError(RuntimeError):
 
 class MissingDependencyError(RuntimeError):
     """Raised when optional dependency is missing."""
+
+
+def normalize_for_match(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def ensure_mutagen_available() -> None:
+    try:
+        import mutagen  # type: ignore  # noqa: F401
+    except ModuleNotFoundError as exc:
+        raise MissingDependencyError(
+            "Missing dependency 'mutagen'. Install it with: pip install mutagen"
+        ) from exc
+
+
+class MetadataEnricher:
+    """Fetches track metadata from external sources and writes ID3 tags."""
+
+    def __init__(self, source: str) -> None:
+        self.source = source
+        self.session = requests.Session()
+        self.session.headers.update(
+            {"User-Agent": "vk-audio-downloader/1.0 (https://github.com/)"}
+        )
+        adapter = HTTPAdapter(max_retries=0)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+        self._last_request_at = 0.0
+        self._consecutive_network_failures = 0
+        self._disabled_due_to_network = False
+
+    def enrich_mp3(self, file_path: Path, track: Dict[str, object]) -> None:
+        if self._disabled_due_to_network:
+            metadata = self.metadata_from_filename(file_path)
+            if not metadata:
+                return
+        else:
+            metadata = self.lookup(track)
+            if not metadata:
+                metadata = self.metadata_from_filename(file_path)
+            if not metadata:
+                return
+
+        from mutagen.easyid3 import EasyID3  # type: ignore
+        from mutagen.id3 import ID3NoHeaderError  # type: ignore
+        from mutagen.mp3 import MP3  # type: ignore
+
+        try:
+            tags = EasyID3(str(file_path))
+        except ID3NoHeaderError:
+            audio_file = MP3(str(file_path))
+            audio_file.add_tags()
+            audio_file.save()
+            tags = EasyID3(str(file_path))
+
+        if metadata.get("title"):
+            tags["title"] = [str(metadata["title"])]
+        if metadata.get("artist"):
+            tags["artist"] = [str(metadata["artist"])]
+        if metadata.get("album"):
+            tags["album"] = [str(metadata["album"])]
+        if metadata.get("date"):
+            tags["date"] = [str(metadata["date"])]
+        if metadata.get("genre"):
+            tags["genre"] = [str(metadata["genre"])]
+
+        tags.save()
+        logging.info("Metadata updated from %s: %s", self.source, file_path.name)
+        self._consecutive_network_failures = 0
+
+    def metadata_from_filename(self, file_path: Path) -> Optional[Dict[str, str]]:
+        stem = file_path.stem.strip()
+        if not stem:
+            return None
+
+        # Expected pattern: "Artist - Title.mp3"
+        if " - " in stem:
+            artist, title = stem.split(" - ", 1)
+            artist = artist.strip()
+            title = title.strip()
+            if artist and title:
+                return {"artist": artist, "title": title}
+
+        # Fallback for artist-folder mode: "<artist>/<title>.mp3"
+        parent_artist = file_path.parent.name.strip()
+        if parent_artist and parent_artist != ".":
+            return {"artist": parent_artist, "title": stem}
+
+        return {"title": stem}
+
+    def lookup(self, track: Dict[str, object]) -> Optional[Dict[str, str]]:
+        if self.source == "musicbrainz":
+            return self.lookup_musicbrainz(track)
+        return None
+
+    def throttle(self) -> None:
+        min_interval = 1.1
+        elapsed = time.monotonic() - self._last_request_at
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+
+    def lookup_musicbrainz(self, track: Dict[str, object]) -> Optional[Dict[str, str]]:
+        if self._disabled_due_to_network:
+            return None
+        artist = str(track.get("artist") or "").strip()
+        title = str(track.get("title") or "").strip()
+        if not artist or not title:
+            return None
+
+        base_url = "https://musicbrainz.org/ws/2/recording"
+        params = {
+            "fmt": "json",
+            "limit": 5,
+            "query": f'recording:"{title}" AND artist:"{artist}"',
+        }
+        full_url = requests.Request("GET", base_url, params=params).prepare().url or base_url
+
+        max_attempts = 4
+        retryable_statuses = {429, 500, 502, 503, 504}
+        response: Optional[requests.Response] = None
+        last_exc: Optional[requests.RequestException] = None
+
+        for attempt in range(1, max_attempts + 1):
+            self.throttle()
+            try:
+                response = self.session.get(base_url, params=params, timeout=30)
+                self._last_request_at = time.monotonic()
+                if response.status_code in retryable_statuses and attempt < max_attempts:
+                    wait_seconds = min(8, 2 ** (attempt - 1))
+                    logging.warning(
+                        "Metadata retry %d/%d (HTTP %d): %s",
+                        attempt,
+                        max_attempts - 1,
+                        response.status_code,
+                        full_url,
+                    )
+                    time.sleep(wait_seconds)
+                    continue
+                response.raise_for_status()
+                break
+            except requests.RequestException as exc:
+                self._last_request_at = time.monotonic()
+                last_exc = exc
+                if attempt < max_attempts:
+                    wait_seconds = min(8, 2 ** (attempt - 1))
+                    logging.warning(
+                        "Metadata retry %d/%d after error: %s (%s)",
+                        attempt,
+                        max_attempts - 1,
+                        full_url,
+                        exc,
+                    )
+                    time.sleep(wait_seconds)
+                    continue
+                self._consecutive_network_failures += 1
+                if self._consecutive_network_failures >= 3:
+                    self._disabled_due_to_network = True
+                    logging.warning(
+                        "Metadata source %s disabled after %d consecutive network failures.",
+                        self.source,
+                        self._consecutive_network_failures,
+                    )
+                raise
+
+        if response is None:
+            if last_exc is not None:
+                raise last_exc
+            return None
+
+        recordings = response.json().get("recordings")
+        if not isinstance(recordings, list) or not recordings:
+            return None
+
+        normalized_title = normalize_for_match(title)
+        normalized_artist = normalize_for_match(artist)
+
+        best_recording: Optional[Dict[str, object]] = None
+        best_rank = (-1, -1, -1)
+        for recording in recordings:
+            if not isinstance(recording, dict):
+                continue
+            recording_title = str(recording.get("title") or "")
+            artist_credit = recording.get("artist-credit") or []
+            artist_credit_names = " ".join(
+                str(item.get("name") or "")
+                for item in artist_credit
+                if isinstance(item, dict)
+            )
+
+            normalized_recording_title = normalize_for_match(recording_title)
+            normalized_credit = normalize_for_match(artist_credit_names)
+
+            title_exact = int(normalized_recording_title == normalized_title)
+            artist_match = int(
+                normalized_artist in normalized_credit or normalized_credit in normalized_artist
+            )
+            score = int(recording.get("score") or 0)
+            rank = (title_exact, artist_match, score)
+            if rank > best_rank:
+                best_rank = rank
+                best_recording = recording
+
+        if not best_recording:
+            return None
+
+        release_list = best_recording.get("releases") if isinstance(best_recording, dict) else None
+        release = release_list[0] if isinstance(release_list, list) and release_list else {}
+        release_title = str(release.get("title") or "").strip() if isinstance(release, dict) else ""
+        release_date = str(release.get("date") or "").strip() if isinstance(release, dict) else ""
+        tags = best_recording.get("tags") if isinstance(best_recording, dict) else None
+        genre = ""
+        if isinstance(tags, list) and tags:
+            first_tag = tags[0]
+            if isinstance(first_tag, dict):
+                genre = str(first_tag.get("name") or "").strip()
+
+        return {
+            "title": str(best_recording.get("title") or title).strip(),
+            "artist": artist,
+            "album": release_title,
+            "date": release_date,
+            "genre": genre,
+        }
 
 
 def setup_logging() -> None:
@@ -405,6 +630,7 @@ def download_tracks_with_skip_log(
     output_dir: Path,
     if_exists: str,
     sort_mode: str,
+    metadata_enricher: Optional[MetadataEnricher] = None,
 ) -> None:
     skipped_file = output_dir / "_skipped.txt"
     skipped_count = 0
@@ -412,7 +638,7 @@ def download_tracks_with_skip_log(
     for track in tracks:
         track_output_path = build_track_output_path(track, output_dir, sort_mode)
         try:
-            result = download_track(track, output_dir, if_exists, sort_mode)
+            result = download_track(track, output_dir, if_exists, sort_mode, metadata_enricher)
             if result is None:
                 append_skipped_track(skipped_file, track_output_path)
                 skipped_count += 1
@@ -425,7 +651,13 @@ def download_tracks_with_skip_log(
         logging.warning("Skipped tracks written to: %s (count: %d)", skipped_file.resolve(), skipped_count)
 
 
-def download_track(track: Dict[str, object], output_dir: Path, if_exists: str, sort_mode: str) -> Optional[Path]:
+def download_track(
+    track: Dict[str, object],
+    output_dir: Path,
+    if_exists: str,
+    sort_mode: str,
+    metadata_enricher: Optional[MetadataEnricher] = None,
+) -> Optional[Path]:
     title = f"{track.get('artist', 'Unknown Artist')} - {track.get('title', 'Unknown Title')}"
     url = track.get("url")
 
@@ -459,6 +691,14 @@ def download_track(track: Dict[str, object], output_dir: Path, if_exists: str, s
         download_file(str(url), output_path)
     logging.info("Track file saved: %s", output_path.resolve())
 
+    if metadata_enricher and output_path.suffix.lower() == ".mp3":
+        try:
+            metadata_enricher.enrich_mp3(output_path, track)
+        except requests.RequestException as exc:
+            logging.warning("Metadata lookup failed for %s: %s", output_path.name, exc)
+        except Exception as exc:  # broad on purpose: metadata failure must not break download
+            logging.warning("Metadata write failed for %s: %s", output_path.name, exc)
+
     return output_path
 
 
@@ -486,6 +726,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="none",
         help="Output sorting mode: none, artist-folder, or artist-folder-name (default: none).",
     )
+    parser.add_argument(
+        "--metadata-source",
+        choices=("none", "musicbrainz"),
+        default="none",
+        help="External metadata source for ID3 tags: none or musicbrainz (default: none).",
+    )
     return parser
 
 
@@ -499,12 +745,16 @@ def main() -> int:
 
     output_dir = Path(args.path).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    metadata_enricher: Optional[MetadataEnricher] = None
+    if args.metadata_source != "none":
+        ensure_mutagen_available()
+        metadata_enricher = MetadataEnricher(args.metadata_source)
 
     try:
         if args.track:
             parsed = parse_track_url(args.track)
             track = get_track_info(args.token, parsed["owner_id"], parsed["audio_id"], parsed.get("access_key"))
-            download_track(track, output_dir, args.if_exists, args.sort)
+            download_track(track, output_dir, args.if_exists, args.sort, metadata_enricher)
         elif args.playlist:
             parsed = parse_playlist_url(args.playlist)
             playlist_title = get_playlist_title(
@@ -522,12 +772,12 @@ def main() -> int:
                 parsed.get("access_key"),
             )
             logging.info("Playlist tracks received: %d", len(tracks))
-            download_tracks_with_skip_log(tracks, output_dir, args.if_exists, args.sort)
+            download_tracks_with_skip_log(tracks, output_dir, args.if_exists, args.sort, metadata_enricher)
         else:
             parsed = parse_user_audio_url(args.user)
             tracks = get_user_tracks(args.token, parsed["owner_id"])
             logging.info("User audio tracks received: %d", len(tracks))
-            download_tracks_with_skip_log(tracks, output_dir, args.if_exists, args.sort)
+            download_tracks_with_skip_log(tracks, output_dir, args.if_exists, args.sort, metadata_enricher)
 
         logging.info("Download completed.")
         return 0
