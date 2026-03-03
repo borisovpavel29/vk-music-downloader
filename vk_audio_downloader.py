@@ -21,7 +21,7 @@ import requests
 from vk_audio.cli import build_parser
 from vk_audio.download import download_track, download_tracks_with_skip_log
 from vk_audio.errors import MissingDependencyError, VkApiError
-from vk_audio.metadata import MetadataEnricher, ensure_mutagen_available
+from vk_audio.metadata import MetadataEnricher, enrich_library_metadata, ensure_mutagen_available
 from vk_audio.vk_api import (
     get_playlist_title,
     get_playlist_tracks,
@@ -42,9 +42,6 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    if not args.token:
-        parser.error("VK token is required. Pass --token or set VK_TOKEN environment variable.")
-
     output_dir = Path(args.path).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -52,6 +49,18 @@ def main() -> int:
     if args.metadata_source != "none":
         ensure_mutagen_available()
         metadata_enricher = MetadataEnricher(args.metadata_source)
+    elif args.metadata_only:
+        parser.error("For --metadata-only you must specify --metadata-source (e.g. --metadata-source auto).")
+
+    if args.metadata_only:
+        if not metadata_enricher:
+            parser.error("Metadata enricher is not initialized.")
+        updated = enrich_library_metadata(output_dir, metadata_enricher)
+        logging.info("Metadata-only mode completed. Processed files: %d", updated)
+        return 0
+
+    if not args.token:
+        parser.error("VK token is required. Pass --token or set VK_TOKEN environment variable.")
 
     try:
         if args.track:
@@ -78,6 +87,8 @@ def main() -> int:
             logging.info("Playlist tracks received: %d", len(tracks))
             download_tracks_with_skip_log(tracks, output_dir, args.if_exists, args.sort, metadata_enricher)
         else:
+            if not args.user:
+                parser.error("Specify one of: --track, --playlist, --user, or use --metadata-only.")
             parsed = parse_user_audio_url(args.user)
             tracks = get_user_tracks(args.token, parsed["owner_id"])
             logging.info("User audio tracks received: %d", len(tracks))

@@ -60,20 +60,41 @@ class MetadataEnricher:
             audio_file.save()
             tags = EasyID3(str(file_path))
 
+        applied_fields: Dict[str, str] = {}
         if metadata.get("title"):
-            tags["title"] = [str(metadata["title"])]
+            value = str(metadata["title"])
+            tags["title"] = [value]
+            applied_fields["title"] = value
         if metadata.get("artist"):
-            tags["artist"] = [str(metadata["artist"])]
-            tags["albumartist"] = [str(metadata["artist"])]
+            artist_value = str(metadata["artist"])
+            tags["artist"] = [artist_value]
+            tags["albumartist"] = [artist_value]
+            applied_fields["artist"] = artist_value
+            applied_fields["albumartist"] = artist_value
         if metadata.get("album"):
-            tags["album"] = [str(metadata["album"])]
+            value = str(metadata["album"])
+            tags["album"] = [value]
+            applied_fields["album"] = value
         if metadata.get("date"):
-            tags["date"] = [str(metadata["date"])]
+            value = str(metadata["date"])
+            tags["date"] = [value]
+            applied_fields["date"] = value
         if metadata.get("genre"):
-            tags["genre"] = [str(metadata["genre"])]
+            value = str(metadata["genre"])
+            tags["genre"] = [value]
+            applied_fields["genre"] = value
 
         tags.save()
-        logging.info("Metadata updated from %s: %s", self._last_metadata_source, file_path.name)
+        if applied_fields:
+            details = ", ".join(f"{key}='{value}'" for key, value in applied_fields.items())
+            logging.info(
+                "Metadata updated from %s: %s (%s)",
+                self._last_metadata_source,
+                file_path.name,
+                details,
+            )
+        else:
+            logging.info("Metadata updated from %s: %s", self._last_metadata_source, file_path.name)
 
     def metadata_from_filename(self, file_path: Path) -> Optional[Dict[str, str]]:
         stem = file_path.stem.strip()
@@ -183,3 +204,27 @@ class MetadataEnricher:
             return {}
 
         return response.json()
+
+
+def enrich_library_metadata(library_path: Path, metadata_enricher: MetadataEnricher) -> int:
+    mp3_files = sorted(library_path.rglob("*.mp3"))
+    if not mp3_files:
+        logging.warning("No mp3 files found for metadata update in: %s", library_path)
+        return 0
+
+    updated_count = 0
+    for file_path in mp3_files:
+        try:
+            parsed = metadata_enricher.metadata_from_filename(file_path) or {}
+            track = {
+                "artist": str(parsed.get("artist") or ""),
+                "title": str(parsed.get("title") or ""),
+            }
+            metadata_enricher.enrich_mp3(file_path, track)
+            updated_count += 1
+        except requests.RequestException as exc:
+            logging.warning("Metadata lookup failed for %s: %s", file_path.name, exc)
+        except Exception as exc:
+            logging.warning("Metadata update failed for %s: %s", file_path.name, exc)
+
+    return updated_count

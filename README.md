@@ -34,6 +34,12 @@ Download all tracks from user audio:
 python vk_audio_downloader.py --user https://vk.com/audios142774160 --token <VK_TOKEN>
 ```
 
+Update metadata for existing local library without downloading:
+
+```bash
+python vk_audio_downloader.py --metadata-only --path ./downloads --metadata-source auto
+```
+
 Save to specific directory:
 
 ```bash
@@ -100,7 +106,7 @@ python vk_audio_downloader.py --track <TRACK_URL>
 - HLS streams from VK (`.m3u8`) are automatically downloaded and converted to `.mp3`.
 - Optional metadata enrichment is available via `--metadata-source <source>` or `--metadata-source auto`.
 - Metadata sources: `itunes`, `deezer`, `musicbrainz`, `lastfm`, `discogs`, or `auto`.
-- `--metadata-source auto` tries sources in this order: `itunes -> deezer -> musicbrainz -> lastfm -> discogs`.
+- `--metadata-source auto` tries sources in this order: `itunes -> deezer -> lastfm -> discogs -> musicbrainz`.
 - `lastfm` requires `LASTFM_API_KEY`, `discogs` requires `DISCOGS_TOKEN`.
 - If external metadata is not found, script falls back to filename parsing (`Artist - Title.mp3`) for ID3 `artist`/`title`.
 - In `--playlist` and `--user` modes, failed tracks are skipped and written to `_skipped.txt` in target directory.

@@ -15,7 +15,7 @@ LOOKUP_BY_SOURCE: Dict[str, LookupCallable] = {
     "discogs": discogs.lookup,
 }
 
-AUTO_SOURCES = ("itunes", "deezer", "musicbrainz", "lastfm", "discogs")
+AUTO_SOURCES = ("itunes", "deezer", "lastfm", "discogs", "musicbrainz")
 ALL_SOURCES = tuple(LOOKUP_BY_SOURCE.keys())
 
 
