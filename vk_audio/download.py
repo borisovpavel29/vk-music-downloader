@@ -4,6 +4,7 @@ import logging
 import re
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
@@ -217,9 +218,19 @@ def download_tracks_with_skip_log(
     if_exists: str,
     sort_mode: str,
     metadata_enricher: Optional[MetadataEnricher] = None,
+    run_started_at: Optional[datetime] = None,
 ) -> None:
     skipped_file = output_dir / "_skipped.txt"
     skipped_count = 0
+    skipped_header_written = False
+    run_started_at_str = (run_started_at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+
+    def append_skipped_track_with_header(display_name: str) -> None:
+        nonlocal skipped_header_written
+        if not skipped_header_written:
+            append_skipped_track(skipped_file, f"=========[{run_started_at_str}]=========")
+            skipped_header_written = True
+        append_skipped_track(skipped_file, display_name)
 
     for track in tracks:
         track_output_path = build_track_output_path(track, output_dir, sort_mode)
@@ -227,11 +238,11 @@ def download_tracks_with_skip_log(
         try:
             result = download_track(track, output_dir, if_exists, sort_mode, metadata_enricher)
             if result is None:
-                append_skipped_track(skipped_file, track_display_name)
+                append_skipped_track_with_header(track_display_name)
                 skipped_count += 1
         except (requests.RequestException, MissingDependencyError, RuntimeError, ValueError) as exc:
             logging.error("Track failed and will be skipped: %s (%s)", track_output_path.name, exc)
-            append_skipped_track(skipped_file, track_display_name)
+            append_skipped_track_with_header(track_display_name)
             skipped_count += 1
 
     if skipped_count > 0:

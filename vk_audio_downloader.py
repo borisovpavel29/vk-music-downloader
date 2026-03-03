@@ -13,6 +13,7 @@ Authentication:
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 import sys
 from pathlib import Path
 
@@ -41,6 +42,7 @@ def main() -> int:
     setup_logging()
     parser = build_parser()
     args = parser.parse_args()
+    run_started_at = datetime.now()
 
     output_dir = Path(args.path).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -85,14 +87,28 @@ def main() -> int:
                 parsed.get("access_key"),
             )
             logging.info("Playlist tracks received: %d", len(tracks))
-            download_tracks_with_skip_log(tracks, output_dir, args.if_exists, args.sort, metadata_enricher)
+            download_tracks_with_skip_log(
+                tracks,
+                output_dir,
+                args.if_exists,
+                args.sort,
+                metadata_enricher,
+                run_started_at,
+            )
         else:
             if not args.user:
                 parser.error("Specify one of: --track, --playlist, --user, or use --metadata-only.")
             parsed = parse_user_audio_url(args.user)
             tracks = get_user_tracks(args.token, parsed["owner_id"])
             logging.info("User audio tracks received: %d", len(tracks))
-            download_tracks_with_skip_log(tracks, output_dir, args.if_exists, args.sort, metadata_enricher)
+            download_tracks_with_skip_log(
+                tracks,
+                output_dir,
+                args.if_exists,
+                args.sort,
+                metadata_enricher,
+                run_started_at,
+            )
 
         logging.info("Download completed.")
         return 0
