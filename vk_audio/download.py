@@ -171,6 +171,12 @@ def track_to_filename(track: Dict[str, object], include_artist: bool = True) -> 
     return sanitize_filename(f"{title}.mp3")
 
 
+def track_to_display_name(track: Dict[str, object]) -> str:
+    artist = str(track.get("artist") or "Unknown Artist").strip()
+    title = str(track.get("title") or "Unknown Title").strip()
+    return f"{artist} - {title}"
+
+
 def build_track_output_path(track: Dict[str, object], base_output_dir: Path, sort_mode: str) -> Path:
     artist = sanitize_filename(str(track.get("artist") or "Unknown Artist"))
     if sort_mode == "artist-folder":
@@ -199,10 +205,10 @@ def convert_to_mp3(source_path: Path, destination_path: Path) -> None:
     raise RuntimeError(f"ffmpeg conversion failed: {last_error or 'unknown ffmpeg error'}")
 
 
-def append_skipped_track(skipped_file: Path, track_output_path: Path) -> None:
+def append_skipped_track(skipped_file: Path, display_name: str) -> None:
     skipped_file.parent.mkdir(parents=True, exist_ok=True)
     with skipped_file.open("a", encoding="utf-8") as file:
-        file.write(f"{track_output_path.name}\n")
+        file.write(f"{display_name}\n")
 
 
 def download_tracks_with_skip_log(
@@ -217,14 +223,15 @@ def download_tracks_with_skip_log(
 
     for track in tracks:
         track_output_path = build_track_output_path(track, output_dir, sort_mode)
+        track_display_name = track_to_display_name(track)
         try:
             result = download_track(track, output_dir, if_exists, sort_mode, metadata_enricher)
             if result is None:
-                append_skipped_track(skipped_file, track_output_path)
+                append_skipped_track(skipped_file, track_display_name)
                 skipped_count += 1
         except (requests.RequestException, MissingDependencyError, RuntimeError, ValueError) as exc:
             logging.error("Track failed and will be skipped: %s (%s)", track_output_path.name, exc)
-            append_skipped_track(skipped_file, track_output_path)
+            append_skipped_track(skipped_file, track_display_name)
             skipped_count += 1
 
     if skipped_count > 0:
@@ -280,4 +287,3 @@ def download_track(
             logging.warning("Metadata write failed for %s: %s", output_path.name, exc)
 
     return output_path
-
